@@ -7,15 +7,11 @@ android {
 
     defaultConfig {
         minSdkVersion 19
-        targetSdkVersion 28
+        targetSdkVersion 30
         versionCode 1
         versionName "1.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-
-        ndk {
-            abiFilters  'armeabi-v7a'
-        }
     }
 
     buildTypes {
@@ -25,17 +21,10 @@ android {
         }
     }
 
-    //so查找路径
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['libs']
-        }
-    }
-
-    //cmake文件的查找路径
     externalNativeBuild {
         cmake {
-            path "CMakeLists.txt"
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.18.1'
         }
     }
 }
