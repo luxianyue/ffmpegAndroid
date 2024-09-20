@@ -38,11 +38,328 @@ jobject createBitmap(JNIEnv *env, int width, int height) {
     return newBitmap;
 }
 
+JNIEXPORT jobject JNICALL
+Java_com_lxy_ffmpeg_FFmpegLib_getVideoInfo(JNIEnv *env, jclass clazz, jstring path) {
+    //初始化
+    const char *_path = env->GetStringUTFChars(path, JNI_FALSE);
+    logDebug("视频路径 == %s", _path);
+
+    AVFormatContext *avFormatCtx = avformat_alloc_context();
+    if (avformat_open_input(&avFormatCtx, _path, nullptr, nullptr) != 0) {
+        logDebug("解封装失败 -- %s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+    if (avformat_find_stream_info(avFormatCtx, nullptr) < 0) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("查找流失败 -- %s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    int video_stream_index = -1;
+    for (int i = 0; i < avFormatCtx->nb_streams; i++) {
+        if (avFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            video_stream_index = i;
+            break;
+        }
+    }
+    if (video_stream_index == -1) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("codecpar没找到 --%s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVCodecParameters *codec_params = avFormatCtx->streams[video_stream_index]->codecpar;
+    const AVCodec *codec = avcodec_find_decoder(codec_params->codec_id);
+    if (!codec) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("没找到解码器 --%s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    jclass frame_class = env->FindClass("com/lxy/ffmpeg/VFrame");
+    jobject vFame = env->AllocObject(frame_class);
+    jfieldID widthId = env->GetFieldID(frame_class, "width", "I");
+    jfieldID heightId = env->GetFieldID(frame_class, "height", "I");
+    jfieldID durationId = env->GetFieldID(frame_class, "duration", "J");
+    env->SetIntField(vFame, widthId, codec_params->width);
+    env->SetIntField(vFame, heightId, codec_params->height);
+    env->SetLongField(vFame, durationId, avFormatCtx->duration);
+
+    avformat_close_input(&avFormatCtx);
+    env->ReleaseStringUTFChars(path, _path);
+    return vFame;
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_lxy_ffmpeg_FFmpegLib_getVideoFrame(JNIEnv *env, jclass clazz, jstring path) {
+    //初始化
+    const char *_path = env->GetStringUTFChars(path, JNI_FALSE);
+    int ret = -1;
+    logDebug("视频路径 == %s", _path);
+
+    AVFormatContext *avFormatCtx = avformat_alloc_context();
+    if (avformat_open_input(&avFormatCtx, _path, nullptr, nullptr) != 0) {
+        logDebug("解封装失败 -- %s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+    if (avformat_find_stream_info(avFormatCtx, nullptr) < 0) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("查找流失败 -- %s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    int video_stream_index = -1;
+    for (int i = 0; i < avFormatCtx->nb_streams; i++) {
+        if (avFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            video_stream_index = i;
+            break;
+        }
+    }
+    if (video_stream_index == -1) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("codecpar没找到 --%s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVCodecParameters *codec_params = avFormatCtx->streams[video_stream_index]->codecpar;
+    const AVCodec *codec = avcodec_find_decoder(codec_params->codec_id);
+    if (!codec) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("没找到解码器 --%s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVCodecContext *codec_ctx = avcodec_alloc_context3(codec);
+    if (avcodec_parameters_to_context(codec_ctx, codec_params) < 0) {
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("codecContext alloc fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    if (avcodec_open2(codec_ctx, codec, nullptr) < 0) {
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("avcodec_open2 fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVFrame *frame = av_frame_alloc();
+    AVPacket packet;
+    int response = 0;
+    int frame_finished = 0;
+    while (av_read_frame(avFormatCtx, &packet) >= 0) {
+        if (packet.stream_index == video_stream_index) {
+            response = avcodec_send_packet(codec_ctx, &packet);
+            if (response < 0) {
+                break;
+            }
+
+            response = avcodec_receive_frame(codec_ctx, frame);
+            if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
+                continue;
+            } else if (response < 0) {
+                break;
+            }
+
+            frame_finished = 1;
+            break;
+        }
+        av_packet_unref(&packet);
+    }
+    av_packet_unref(&packet);
+    if (!frame_finished) {
+        av_frame_free(&frame);
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("av_read_frame fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    int width = codec_ctx->width;
+    int height = codec_ctx->height;
+    SwsContext *sws_ctx = sws_getContext(width, height, codec_ctx->pix_fmt,
+                                         width, height, AV_PIX_FMT_RGBA,
+                                         SWS_BILINEAR, nullptr, nullptr, nullptr);
+    int num_bytes = av_image_get_buffer_size(AV_PIX_FMT_RGBA, width, height, 1);
+    uint8_t *buffer = (uint8_t *) av_malloc(num_bytes * sizeof(uint8_t));
+    AVFrame *frame_rgba = av_frame_alloc();
+    av_image_fill_arrays(frame_rgba->data, frame_rgba->linesize, buffer, AV_PIX_FMT_RGBA, width, height, 1);
+    sws_scale(sws_ctx, (uint8_t const * const *) frame->data, frame->linesize, 0, height, frame_rgba->data, frame_rgba->linesize);
+
+    jbyteArray frame_data = env->NewByteArray(num_bytes);
+    env->SetByteArrayRegion(frame_data, 0, num_bytes, (jbyte *) buffer);
+
+    jclass frame_class = env->FindClass("com/lxy/ffmpeg/VFrame");
+    jobject vFame = env->AllocObject(frame_class);
+    jfieldID durationId = env->GetFieldID(frame_class, "duration", "J");
+    env->SetIntField(vFame, env->GetFieldID(frame_class, "width", "I"), width);
+    env->SetIntField(vFame, env->GetFieldID(frame_class, "height", "I"), height);
+    env->SetLongField(vFame, durationId, avFormatCtx->duration);
+    env->SetObjectField(vFame, env->GetFieldID(frame_class, "frame", "[B"), frame_data);
+
+    av_free(buffer);
+    av_frame_free(&frame_rgba);
+    av_frame_free(&frame);
+    avcodec_free_context(&codec_ctx);
+    avformat_close_input(&avFormatCtx);
+    env->ReleaseStringUTFChars(path, _path);
+    return vFame;
+}
+
 
 JNIEXPORT jobject JNICALL
 Java_com_lxy_ffmpeg_FFmpegLib_getVideoImage(JNIEnv *env, jclass clazz, jstring path) {
-    //初始化
     const char *_path = env->GetStringUTFChars(path, JNI_FALSE);
+    logDebug("视频路径 == %s", _path);
+
+    AVFormatContext *avFormatCtx = avformat_alloc_context();
+    if (avformat_open_input(&avFormatCtx, _path, nullptr, nullptr) != 0) {
+        logDebug("解封装失败 -- %s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+    if (avformat_find_stream_info(avFormatCtx, nullptr) < 0) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("查找流失败 -- %s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    int video_stream_index = -1;
+    for (int i = 0; i < avFormatCtx->nb_streams; i++) {
+        if (avFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            video_stream_index = i;
+            break;
+        }
+    }
+    if (video_stream_index == -1) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("codecpar没找到 --%s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVCodecParameters *codec_params = avFormatCtx->streams[video_stream_index]->codecpar;
+    const AVCodec *codec = avcodec_find_decoder(codec_params->codec_id);
+    if (!codec) {
+        avformat_close_input(&avFormatCtx);
+        logDebug("没找到解码器 --%s", _path);
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVCodecContext *codec_ctx = avcodec_alloc_context3(codec);
+    if (avcodec_parameters_to_context(codec_ctx, codec_params) < 0) {
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("codecContext alloc fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    if (avcodec_open2(codec_ctx, codec, nullptr) < 0) {
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("avcodec_open2 fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVFrame *frame = av_frame_alloc();
+    AVPacket packet;
+    int response = 0;
+    int frame_finished = 0;
+    while (av_read_frame(avFormatCtx, &packet) >= 0) {
+        if (packet.stream_index == video_stream_index) {
+            response = avcodec_send_packet(codec_ctx, &packet);
+            if (response < 0) {
+                break;
+            }
+
+            response = avcodec_receive_frame(codec_ctx, frame);
+            if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
+                continue;
+            } else if (response < 0) {
+                break;
+            }
+
+            frame_finished = 1;
+            break;
+        }
+        av_packet_unref(&packet);
+    }
+    av_packet_unref(&packet);
+    if (!frame_finished) {
+        av_frame_free(&frame);
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("av_read_frame fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    SwsContext *sws_ctx = sws_getContext(codec_ctx->width, codec_ctx->height, codec_ctx->pix_fmt,
+                                         codec_ctx->width, codec_ctx->height, AV_PIX_FMT_RGBA,
+                                         SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+    if (!sws_ctx) {
+        av_frame_free(&frame);
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("sws_getContext fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    AVFrame *rgb_frame = av_frame_alloc();
+    int num_bytes = av_image_get_buffer_size(AV_PIX_FMT_RGBA, codec_ctx->width, codec_ctx->height, 1);
+    uint8_t *buffer = (uint8_t *) av_malloc(num_bytes * sizeof(uint8_t));
+    av_image_fill_arrays(rgb_frame->data, rgb_frame->linesize, buffer, AV_PIX_FMT_RGBA, codec_ctx->width, codec_ctx->height, 1);
+
+    sws_scale(sws_ctx, (uint8_t const *const *) frame->data, frame->linesize, 0, codec_ctx->height, rgb_frame->data, rgb_frame->linesize);
+    jobject bitmap = createBitmap(env, codec_ctx->width, codec_ctx->height);
+
+    void *bitmap_pixels;
+    if (AndroidBitmap_lockPixels(env, bitmap, &bitmap_pixels) < 0) {
+        av_free(buffer);
+        av_frame_free(&rgb_frame);
+        sws_freeContext(sws_ctx);
+        av_frame_free(&frame);
+        avcodec_free_context(&codec_ctx);
+        avformat_close_input(&avFormatCtx);
+        logDebug("AndroidBitmap_lockPixels fail");
+        env->ReleaseStringUTFChars(path, _path);
+        return nullptr;
+    }
+
+    memcpy(bitmap_pixels, rgb_frame->data[0], num_bytes);
+    AndroidBitmap_unlockPixels(env, bitmap);
+
+    av_free(buffer);
+    av_frame_free(&rgb_frame);
+    sws_freeContext(sws_ctx);
+    av_frame_free(&frame);
+    avcodec_free_context(&codec_ctx);
+    avformat_close_input(&avFormatCtx);
+    env->ReleaseStringUTFChars(path, _path);
+    return bitmap;
+
+
+
+    //初始化
+    /*const char *_path = env->GetStringUTFChars(path, JNI_FALSE);
     int ret = -1;
     logDebug("视频路径 == %s", _path);
 
@@ -183,7 +500,7 @@ Java_com_lxy_ffmpeg_FFmpegLib_getVideoImage(JNIEnv *env, jclass clazz, jstring p
     avcodec_free_context(&codec_ctx);
     avformat_close_input(&ifmt_ctx);
     env->ReleaseStringUTFChars(path, _path);
-    return bmp;
+    return bmp;*/
 }
 
 JNIEXPORT jint JNICALL
